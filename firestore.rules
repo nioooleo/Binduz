@@ -1,0 +1,742 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Health check document for startup getDocFromServer validation
+    match /test/connection {
+      allow get: if true;
+    }
+
+    // --- Reusable Hardened Helpers ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isBootstrappedSuperAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'nioooleo@gmail.com';
+    }
+
+    function callerPrivateDoc() {
+      return get(/databases/$(database)/documents/users_private/$(request.auth.uid));
+    }
+
+    function callerRole() {
+      return exists(/databases/$(database)/documents/users_private/$(request.auth.uid))
+        ? callerPrivateDoc().data.role
+        : 'Registered User';
+    }
+
+    function isAdmin() {
+      return isBootstrappedSuperAdmin() || (isVerifiedUser() && callerRole() in ['Super Admin', 'Admin']);
+    }
+
+    function isEditorialStaff() {
+      return isAdmin() || (isVerifiedUser() && callerRole() in ['Editor-in-Chief', 'Editor', 'Journalist', 'Reporter', 'Writer', 'Proofreader', 'SEO Manager']);
+    }
+
+    function isEditorOrChief() {
+      return isAdmin() || (isVerifiedUser() && callerRole() in ['Editor-in-Chief', 'Editor']);
+    }
+
+    function isMediaStaff() {
+      return isAdmin() || (isVerifiedUser() && callerRole() in ['Media Manager', 'Editor-in-Chief', 'Editor']);
+    }
+
+    function isAdStaff() {
+      return isAdmin() || (isVerifiedUser() && callerRole() == 'Advertisement Manager');
+    }
+
+    function isModerator() {
+      return isAdmin() || (isVerifiedUser() && callerRole() in ['Moderator', 'Editor-in-Chief', 'Editor']);
+    }
+
+    function isValidRoleName(role) {
+      return role in [
+        'Super Admin',
+        'Admin',
+        'Editor-in-Chief',
+        'Editor',
+        'Journalist',
+        'Reporter',
+        'Writer',
+        'Proofreader',
+        'SEO Manager',
+        'Media Manager',
+        'Advertisement Manager',
+        'Moderator',
+        'Registered User',
+        'Guest'
+      ];
+    }
+
+    // --- Validation Blueprints ---
+    function isValidUserPublic(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'role', 'title', 'bio', 'updatedAt'])
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500))
+        && isValidRoleName(data.role)
+        && (!('title' in data) || (data.title is string && data.title.size() <= 100))
+        && (!('bio' in data) || (data.bio is string && data.bio.size() <= 500))
+        && data.updatedAt == request.time;
+    }
+
+    function isValidUserPrivate(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'role', 'preferredLanguage', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 180
+        && isValidRoleName(data.role)
+        && (!('preferredLanguage' in data) || data.preferredLanguage in ['en', 'es', 'fr', 'de', 'ja'])
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidArticle(data, articleId) {
+      return data.keys().hasAll(['id', 'slug', 'title', 'excerpt', 'content', 'category', 'status', 'authorId', 'authorName', 'imageUrl', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'slug', 'title', 'subtitle', 'excerpt', 'content', 'category', 'status',
+          'authorId', 'authorName', 'imageUrl', 'videoUrl', 'audioUrl', 'locationName', 'lat', 'lng',
+          'isBreaking', 'isTrending', 'isFeatured', 'isEditorsPick', 'isSpecialReport',
+          'sourceName', 'sourceUrl', 'views', 'likesCount', 'commentsCount',
+          'seoTitle', 'seoDescription', 'focusKeywords', 'aiSummary', 'canonicalUrl',
+          'language', 'scheduledAt', 'publishedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.id == articleId
+        && isValidId(data.id)
+        && data.slug is string && data.slug.size() >= 3 && data.slug.size() <= 160 && data.slug.matches('^[a-z0-9\\-]+$')
+        && data.title is string && data.title.size() >= 5 && data.title.size() <= 220
+        && (!('subtitle' in data) || (data.subtitle is string && data.subtitle.size() <= 320))
+        && data.excerpt is string && data.excerpt.size() >= 10 && data.excerpt.size() <= 600
+        && data.content is string && data.content.size() >= 20 && data.content.size() <= 30000
+        && data.category in ['Bangladesh National', 'Politics', 'Economy', 'Business', 'Technology', 'Sports', 'Entertainment', 'Education', 'International']
+        && data.status in ['draft', 'in_review', 'proofread', 'approved', 'scheduled', 'published', 'archived']
+        && isValidId(data.authorId)
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 80
+        && data.imageUrl is string && data.imageUrl.size() >= 1 && data.imageUrl.size() <= 600
+        && (!('videoUrl' in data) || (data.videoUrl is string && data.videoUrl.size() <= 600))
+        && (!('audioUrl' in data) || (data.audioUrl is string && data.audioUrl.size() <= 600))
+        && (!('locationName' in data) || (data.locationName is string && data.locationName.size() <= 120))
+        && (!('lat' in data) || (data.lat is number && data.lat >= -90 && data.lat <= 90))
+        && (!('lng' in data) || (data.lng is number && data.lng >= -180 && data.lng <= 180))
+        && (!('isBreaking' in data) || data.isBreaking is bool)
+        && (!('isTrending' in data) || data.isTrending is bool)
+        && (!('isFeatured' in data) || data.isFeatured is bool)
+        && (!('isEditorsPick' in data) || data.isEditorsPick is bool)
+        && (!('isSpecialReport' in data) || data.isSpecialReport is bool)
+        && (!('sourceName' in data) || (data.sourceName is string && data.sourceName.size() <= 100))
+        && (!('sourceUrl' in data) || (data.sourceUrl is string && data.sourceUrl.size() <= 500))
+        && (!('views' in data) || (data.views is int && data.views >= 0))
+        && (!('likesCount' in data) || (data.likesCount is int && data.likesCount >= 0))
+        && (!('commentsCount' in data) || (data.commentsCount is int && data.commentsCount >= 0))
+        && (!('seoTitle' in data) || (data.seoTitle is string && data.seoTitle.size() <= 120))
+        && (!('seoDescription' in data) || (data.seoDescription is string && data.seoDescription.size() <= 240))
+        && (!('focusKeywords' in data) || (data.focusKeywords is list && data.focusKeywords.size() <= 10 && (data.focusKeywords.size() == 0 || data.focusKeywords[0] is string)))
+        && (!('aiSummary' in data) || (data.aiSummary is string && data.aiSummary.size() <= 1200))
+        && (!('canonicalUrl' in data) || (data.canonicalUrl is string && data.canonicalUrl.size() <= 400))
+        && (!('language' in data) || data.language in ['en', 'es', 'fr', 'de', 'ja'])
+        && (!('scheduledAt' in data) || (data.scheduledAt is string && data.scheduledAt.size() <= 64))
+        && (!('publishedAt' in data) || (data.publishedAt is string && data.publishedAt.size() <= 64))
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidArticleRevision(data, articleId, revisionId) {
+      return data.keys().hasAll(['id', 'articleId', 'title', 'content', 'status', 'editorId', 'editorName', 'createdAt'])
+        && data.keys().hasOnly(['id', 'articleId', 'title', 'excerpt', 'content', 'status', 'editorId', 'editorName', 'changeSummary', 'createdAt'])
+        && data.id == revisionId
+        && isValidId(data.id)
+        && data.articleId == articleId
+        && isValidId(data.articleId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 220
+        && (!('excerpt' in data) || (data.excerpt is string && data.excerpt.size() <= 600))
+        && data.content is string && data.content.size() >= 1 && data.content.size() <= 30000
+        && data.status in ['draft', 'in_review', 'proofread', 'approved', 'scheduled', 'published', 'archived']
+        && data.editorId == request.auth.uid
+        && isValidId(data.editorId)
+        && data.editorName is string && data.editorName.size() >= 1 && data.editorName.size() <= 80
+        && (!('changeSummary' in data) || (data.changeSummary is string && data.changeSummary.size() <= 160))
+        && data.createdAt == request.time;
+    }
+
+    function isValidCmsPage(data, pageId) {
+      return data.keys().hasAll(['id', 'slug', 'title', 'status', 'blocks', 'authorId', 'authorName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'slug', 'title', 'description', 'status', 'showInHeader', 'showInFooter',
+          'blocks', 'seoTitle', 'seoDescription', 'authorId', 'authorName',
+          'scheduledAt', 'publishedAt', 'createdAt', 'updatedAt'
+        ])
+        && data.id == pageId
+        && isValidId(data.id)
+        && data.slug is string && data.slug.size() >= 2 && data.slug.size() <= 120 && data.slug.matches('^[a-z0-9\\-]+$')
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 160
+        && (!('description' in data) || (data.description is string && data.description.size() <= 400))
+        && data.status in ['draft', 'scheduled', 'published', 'archived']
+        && (!('showInHeader' in data) || data.showInHeader is bool)
+        && (!('showInFooter' in data) || data.showInFooter is bool)
+        && data.blocks is list && data.blocks.size() <= 25 && (data.blocks.size() == 0 || data.blocks[0] is map)
+        && (!('seoTitle' in data) || (data.seoTitle is string && data.seoTitle.size() <= 120))
+        && (!('seoDescription' in data) || (data.seoDescription is string && data.seoDescription.size() <= 240))
+        && isValidId(data.authorId)
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 80
+        && (!('scheduledAt' in data) || (data.scheduledAt is string && data.scheduledAt.size() <= 64))
+        && (!('publishedAt' in data) || (data.publishedAt is string && data.publishedAt.size() <= 64))
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidPageRevision(data, pageId, revisionId) {
+      return data.keys().hasAll(['id', 'pageId', 'title', 'status', 'blocks', 'editorId', 'editorName', 'createdAt'])
+        && data.keys().hasOnly(['id', 'pageId', 'title', 'status', 'blocks', 'editorId', 'editorName', 'createdAt'])
+        && data.id == revisionId
+        && isValidId(data.id)
+        && data.pageId == pageId
+        && isValidId(data.pageId)
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 160
+        && data.status in ['draft', 'scheduled', 'published', 'archived']
+        && data.blocks is list && data.blocks.size() <= 25 && (data.blocks.size() == 0 || data.blocks[0] is map)
+        && data.editorId == request.auth.uid
+        && isValidId(data.editorId)
+        && data.editorName is string && data.editorName.size() >= 1 && data.editorName.size() <= 80
+        && data.createdAt == request.time;
+    }
+
+    function isValidHomepageSection(data, sectionId) {
+      return data.keys().hasAll(['id', 'sectionType', 'title', 'visible', 'orderIndex', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'sectionType', 'title', 'subtitle', 'visible', 'orderIndex', 'itemCount',
+          'categoryFilter', 'layoutVariant', 'accentColor', 'promoHeadline', 'promoBody',
+          'promoImageUrl', 'promoVideoUrl', 'promoButtonText', 'promoButtonUrl',
+          'autoPlayMs', 'updatedBy', 'updatedAt'
+        ])
+        && data.id == sectionId
+        && isValidId(data.id)
+        && data.sectionType in [
+          'hero_slider_trending', 'trending_now', 'live_news', 'breaking_news', 'latest_news', 'video_news',
+          'audio_news', 'brand_promotions', 'editors_picks', 'most_read', 'categories_bento',
+          'special_reports', 'crawler_endpoints', 'custom_banner'
+        ]
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && (!('subtitle' in data) || (data.subtitle is string && data.subtitle.size() <= 240))
+        && data.visible is bool
+        && data.orderIndex is int && data.orderIndex >= 0 && data.orderIndex <= 200
+        && (!('itemCount' in data) || (data.itemCount is int && data.itemCount >= 1 && data.itemCount <= 30))
+        && (!('categoryFilter' in data) || (data.categoryFilter is string && data.categoryFilter.size() <= 40))
+        && (!('layoutVariant' in data) || data.layoutVariant in ['default', 'grid', 'list', 'bento', 'spotlight'])
+        && (!('accentColor' in data) || (data.accentColor is string && data.accentColor.size() <= 32))
+        && (!('promoHeadline' in data) || (data.promoHeadline is string && data.promoHeadline.size() <= 180))
+        && (!('promoBody' in data) || (data.promoBody is string && data.promoBody.size() <= 400))
+        && (!('promoImageUrl' in data) || (data.promoImageUrl is string && data.promoImageUrl.size() <= 600))
+        && (!('promoVideoUrl' in data) || (data.promoVideoUrl is string && data.promoVideoUrl.size() <= 600))
+        && (!('promoButtonText' in data) || (data.promoButtonText is string && data.promoButtonText.size() <= 60))
+        && (!('promoButtonUrl' in data) || (data.promoButtonUrl is string && data.promoButtonUrl.size() <= 300))
+        && (!('autoPlayMs' in data) || (data.autoPlayMs is int && data.autoPlayMs >= 2000 && data.autoPlayMs <= 30000))
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time;
+    }
+
+    function isValidNavigationItem(data, itemId) {
+      return data.keys().hasAll(['id', 'label', 'location', 'targetType', 'targetValue', 'orderIndex', 'visible', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'label', 'location', 'targetType', 'targetValue', 'orderIndex', 'visible', 'updatedBy', 'updatedAt'])
+        && data.id == itemId
+        && isValidId(data.id)
+        && data.label is string && data.label.size() >= 1 && data.label.size() <= 60
+        && data.location in ['header', 'footer']
+        && data.targetType in ['view', 'page', 'category', 'url']
+        && data.targetValue is string && data.targetValue.size() >= 1 && data.targetValue.size() <= 300
+        && data.orderIndex is int && data.orderIndex >= 0 && data.orderIndex <= 200
+        && data.visible is bool
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time;
+    }
+
+    function isValidRolePermissionConfig(data, roleId) {
+      return data.keys().hasAll(['id', 'roleName', 'canPublish', 'canEditAll', 'canWriteDraft', 'canManagePages', 'canCustomizeSite', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'roleName', 'canPublish', 'canEditAll', 'canWriteDraft', 'canProofread',
+          'canManageSeo', 'canManageMedia', 'canManageAds', 'canModerateComments',
+          'canManagePages', 'canCustomizeSite', 'canManageRoles', 'canViewAuditLogs',
+          'canConfigureSettings', 'updatedBy', 'updatedAt'
+        ])
+        && data.id == roleId
+        && isValidId(data.id)
+        && isValidRoleName(data.roleName)
+        && data.canPublish is bool
+        && data.canEditAll is bool
+        && data.canWriteDraft is bool
+        && (!('canProofread' in data) || data.canProofread is bool)
+        && (!('canManageSeo' in data) || data.canManageSeo is bool)
+        && (!('canManageMedia' in data) || data.canManageMedia is bool)
+        && (!('canManageAds' in data) || data.canManageAds is bool)
+        && (!('canModerateComments' in data) || data.canModerateComments is bool)
+        && data.canManagePages is bool
+        && data.canCustomizeSite is bool
+        && (!('canManageRoles' in data) || data.canManageRoles is bool)
+        && (!('canViewAuditLogs' in data) || data.canViewAuditLogs is bool)
+        && (!('canConfigureSettings' in data) || data.canConfigureSettings is bool)
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time;
+    }
+
+    function isValidComment(data, articleId, commentId) {
+      return data.keys().hasAll(['id', 'articleId', 'authorId', 'authorName', 'content', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'articleId', 'authorId', 'authorName', 'content', 'status', 'createdAt', 'updatedAt'])
+        && data.id == commentId
+        && isValidId(data.id)
+        && data.articleId == articleId
+        && isValidId(data.articleId)
+        && isValidId(data.authorId)
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 80
+        && data.content is string && data.content.size() >= 2 && data.content.size() <= 1500
+        && data.status in ['approved', 'pending', 'flagged', 'removed']
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidBookmark(data, articleId) {
+      return data.keys().hasAll(['articleId', 'title', 'category', 'savedAt'])
+        && data.keys().hasOnly(['articleId', 'title', 'category', 'imageUrl', 'savedAt'])
+        && data.articleId == articleId
+        && isValidId(data.articleId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 220
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 60
+        && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 600))
+        && data.savedAt == request.time;
+    }
+
+    function isValidSubscriber(data, subscriberId) {
+      return data.keys().hasAll(['id', 'email', 'frequency', 'subscribedAt'])
+        && data.keys().hasOnly(['id', 'email', 'frequency', 'topics', 'subscribedAt'])
+        && data.id == subscriberId
+        && isValidId(data.id)
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 180
+        && data.frequency in ['daily', 'weekly', 'breaking']
+        && (!('topics' in data) || (data.topics is list && data.topics.size() <= 6 && (data.topics.size() == 0 || data.topics[0] is string)))
+        && data.subscribedAt == request.time;
+    }
+
+    function isValidMediaAsset(data, assetId) {
+      return data.keys().hasAll(['id', 'url', 'title', 'altText', 'aspectRatio', 'uploadedBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'url', 'mediaType', 'title', 'altText', 'aspectRatio', 'uploadedBy', 'createdAt', 'updatedAt'])
+        && data.id == assetId
+        && isValidId(data.id)
+        && data.url is string && data.url.size() >= 1 && data.url.size() <= 600
+        && (!('mediaType' in data) || data.mediaType in ['image', 'video'])
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 160
+        && data.altText is string && data.altText.size() >= 4 && data.altText.size() <= 260
+        && data.aspectRatio in ['16:9', '4:3', '1:1', '3:4']
+        && isValidId(data.uploadedBy)
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidCampaign(data, campaignId) {
+      return data.keys().hasAll(['id', 'title', 'sponsor', 'placement', 'targetUrl', 'status', 'impressions', 'clicks', 'ownerId', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'title', 'sponsor', 'placement', 'targetUrl', 'imageUrl', 'buttonText', 'status', 'impressions', 'clicks', 'ownerId', 'createdAt', 'updatedAt'])
+        && data.id == campaignId
+        && isValidId(data.id)
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 140
+        && data.sponsor is string && data.sponsor.size() >= 2 && data.sponsor.size() <= 100
+        && data.placement in ['sidebar_featured', 'hero_ribbon', 'article_inline', 'newsletter_sponsor']
+        && data.targetUrl is string && data.targetUrl.size() >= 1 && data.targetUrl.size() <= 400
+        && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 600))
+        && (!('buttonText' in data) || (data.buttonText is string && data.buttonText.size() <= 60))
+        && data.status in ['active', 'paused', 'ended']
+        && data.impressions is int && data.impressions >= 0
+        && data.clicks is int && data.clicks >= 0
+        && isValidId(data.ownerId)
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidAuditLog(data, logId) {
+      return data.keys().hasAll(['id', 'actorId', 'actorRole', 'action', 'targetType', 'targetId', 'createdAt'])
+        && data.keys().hasOnly(['id', 'actorId', 'actorRole', 'action', 'targetType', 'targetId', 'details', 'createdAt'])
+        && data.id == logId
+        && isValidId(data.id)
+        && data.actorId == request.auth.uid
+        && isValidId(data.actorId)
+        && data.actorRole is string && data.actorRole.size() <= 40
+        && data.action is string && data.action.size() >= 2 && data.action.size() <= 80
+        && data.targetType is string && data.targetType.size() >= 2 && data.targetType.size() <= 40
+        && data.targetId is string && data.targetId.size() >= 1 && data.targetId.size() <= 128
+        && (!('details' in data) || (data.details is string && data.details.size() <= 400))
+        && data.createdAt == request.time;
+    }
+
+    function isValidSettings(data) {
+      return data.keys().hasAll(['siteName', 'defaultLanguage', 'enableComments', 'enableAiGeo', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly([
+          'siteName', 'tagline', 'brandMarkText', 'headerCtaLabel', 'headerCtaUrl',
+          'footerCopyright', 'footerBio', 'primaryColor', 'secondaryColor',
+          'headerBgColor', 'footerBgColor', 'displayFont', 'bodyFont', 'showBreakingBar',
+          'defaultLanguage', 'enableComments', 'enableAiGeo', 'updatedBy', 'updatedAt'
+        ])
+        && data.siteName is string && data.siteName.size() >= 2 && data.siteName.size() <= 80
+        && (!('tagline' in data) || (data.tagline is string && data.tagline.size() <= 180))
+        && (!('brandMarkText' in data) || (data.brandMarkText is string && data.brandMarkText.size() <= 4))
+        && (!('headerCtaLabel' in data) || (data.headerCtaLabel is string && data.headerCtaLabel.size() <= 40))
+        && (!('headerCtaUrl' in data) || (data.headerCtaUrl is string && data.headerCtaUrl.size() <= 200))
+        && (!('footerCopyright' in data) || (data.footerCopyright is string && data.footerCopyright.size() <= 160))
+        && (!('footerBio' in data) || (data.footerBio is string && data.footerBio.size() <= 320))
+        && (!('primaryColor' in data) || (data.primaryColor is string && data.primaryColor.size() <= 24))
+        && (!('secondaryColor' in data) || (data.secondaryColor is string && data.secondaryColor.size() <= 24))
+        && (!('headerBgColor' in data) || (data.headerBgColor is string && data.headerBgColor.size() <= 24))
+        && (!('footerBgColor' in data) || (data.footerBgColor is string && data.footerBgColor.size() <= 24))
+        && (!('displayFont' in data) || (data.displayFont is string && data.displayFont.size() <= 60))
+        && (!('bodyFont' in data) || (data.bodyFont is string && data.bodyFont.size() <= 60))
+        && (!('showBreakingBar' in data) || data.showBreakingBar is bool)
+        && data.defaultLanguage in ['en', 'es', 'fr', 'de', 'ja']
+        && data.enableComments is bool
+        && data.enableAiGeo is bool
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time;
+    }
+
+    // --- Collection Rules ---
+
+    // Public directory (No PII)
+    match /users_public/{userId} {
+      allow get: if isValidId(userId);
+      allow list: if resource.data.role != 'Guest';
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserPublic(incoming(), userId)
+        && (
+          (isOwner(userId) && (incoming().role == 'Registered User' || isBootstrappedSuperAdmin()))
+          || isAdmin()
+        );
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserPublic(incoming(), userId)
+        && incoming().uid == existing().uid
+        && (
+          (isOwner(userId)
+            && incoming().role == existing().role
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'title', 'bio', 'updatedAt']))
+          || (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'role', 'title', 'bio', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    // Private PII & Role Store
+    match /users_private/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isVerifiedUser() && (resource.data.uid == request.auth.uid || isBootstrappedSuperAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserPrivate(incoming(), userId)
+        && incoming().createdAt == request.time
+        && (
+          (isOwner(userId) && incoming().email == request.auth.token.email && (incoming().role == 'Registered User' || (isBootstrappedSuperAdmin() && incoming().role == 'Super Admin')))
+          || isAdmin()
+        );
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserPrivate(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && (
+          (isOwner(userId)
+            && incoming().role == existing().role
+            && incoming().email == existing().email
+            && incoming().diff(existing()).affectedKeys().hasOnly(['preferredLanguage', 'updatedAt']))
+          || (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'preferredLanguage', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(userId);
+
+      // Private Bookmarks subcollection
+      match /bookmarks/{articleId} {
+        allow get: if isValidId(userId) && isValidId(articleId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId);
+        allow create: if isValidId(userId)
+          && isValidId(articleId)
+          && isOwner(userId)
+          && isValidBookmark(incoming(), articleId)
+          && exists(/databases/$(database)/documents/articles/$(articleId));
+        allow update: if false;
+        allow delete: if isValidId(userId) && isValidId(articleId) && isOwner(userId);
+      }
+    }
+
+    // Articles & Editorial Workflow + Revisions
+    match /articles/{articleId} {
+      allow get: if isValidId(articleId) && (
+        existing().status == 'published'
+        || (isVerifiedUser() && (existing().authorId == request.auth.uid || isEditorialStaff()))
+      );
+      allow list: if resource.data.status == 'published'
+        || (isVerifiedUser() && resource.data.authorId == request.auth.uid)
+        || isBootstrappedSuperAdmin();
+      allow create: if isVerifiedUser()
+        && isValidId(articleId)
+        && isValidArticle(incoming(), articleId)
+        && incoming().createdAt == request.time
+        && incoming().authorId == request.auth.uid
+        && isEditorialStaff()
+        && (incoming().status in ['draft', 'in_review'] || isEditorOrChief());
+      allow update: if isVerifiedUser()
+        && isValidId(articleId)
+        && isValidArticle(incoming(), articleId)
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().authorId == existing().authorId
+        && (
+          isAdmin()
+          || (isEditorOrChief()
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'slug', 'title', 'subtitle', 'excerpt', 'content', 'category', 'status',
+              'imageUrl', 'videoUrl', 'locationName', 'lat', 'lng',
+              'isBreaking', 'isTrending', 'isFeatured', 'isEditorsPick', 'isSpecialReport',
+              'sourceName', 'sourceUrl', 'seoTitle', 'seoDescription',
+              'focusKeywords', 'aiSummary', 'canonicalUrl', 'language', 'scheduledAt',
+              'publishedAt', 'updatedAt'
+            ]))
+          || (existing().authorId == request.auth.uid
+            && existing().status != 'archived'
+            && incoming().status in ['draft', 'in_review']
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'slug', 'title', 'subtitle', 'excerpt', 'content', 'category', 'status',
+              'imageUrl', 'videoUrl', 'locationName', 'lat', 'lng', 'language', 'updatedAt'
+            ]))
+          || (callerRole() == 'Proofreader'
+            && existing().status in ['in_review', 'proofread']
+            && incoming().status in ['proofread', 'approved']
+            && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'subtitle', 'excerpt', 'content', 'status', 'updatedAt']))
+          || (callerRole() == 'SEO Manager'
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'slug', 'seoTitle', 'seoDescription', 'focusKeywords', 'aiSummary', 'canonicalUrl', 'updatedAt'
+            ]))
+          || (existing().status == 'published'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['views', 'likesCount', 'commentsCount', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(articleId);
+
+      // Comments Subcollection
+      match /comments/{commentId} {
+        allow get: if isValidId(articleId) && isValidId(commentId) && (
+          existing().status == 'approved'
+          || (isVerifiedUser() && (existing().authorId == request.auth.uid || isModerator()))
+        );
+        allow list: if isValidId(articleId) && (
+          resource.data.status == 'approved'
+          || (isVerifiedUser() && resource.data.authorId == request.auth.uid)
+          || isBootstrappedSuperAdmin()
+        );
+        allow create: if isVerifiedUser()
+          && isValidId(articleId)
+          && isValidId(commentId)
+          && isValidComment(incoming(), articleId, commentId)
+          && incoming().createdAt == request.time
+          && incoming().authorId == request.auth.uid
+          && incoming().status in ['approved', 'pending']
+          && get(/databases/$(database)/documents/articles/$(articleId)).data.status == 'published';
+        allow update: if isVerifiedUser()
+          && isValidId(articleId)
+          && isValidId(commentId)
+          && isValidComment(incoming(), articleId, commentId)
+          && incoming().id == existing().id
+          && incoming().articleId == existing().articleId
+          && incoming().authorId == existing().authorId
+          && incoming().createdAt == existing().createdAt
+          && (
+            (isModerator() && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+            || (existing().authorId == request.auth.uid
+              && existing().status != 'removed'
+              && incoming().status == existing().status
+              && incoming().diff(existing()).affectedKeys().hasOnly(['content', 'updatedAt']))
+          );
+        allow delete: if isValidId(articleId) && isValidId(commentId) && (isModerator() || (isVerifiedUser() && existing().authorId == request.auth.uid));
+      }
+
+      // Article Autosave & Revision History (Master Gate + Immutable Snapshots)
+      match /revisions/{revisionId} {
+        allow get: if isValidId(articleId) && isValidId(revisionId) && isEditorialStaff() && exists(/databases/$(database)/documents/articles/$(articleId));
+        allow list: if isValidId(articleId) && (isBootstrappedSuperAdmin() || (isVerifiedUser() && resource.data.editorId == request.auth.uid));
+        allow create: if isVerifiedUser()
+          && isValidId(articleId)
+          && isValidId(revisionId)
+          && isEditorialStaff()
+          && isValidArticleRevision(incoming(), articleId, revisionId)
+          && exists(/databases/$(database)/documents/articles/$(articleId));
+        allow update, delete: if false;
+      }
+    }
+
+    // Unlimited WordPress-style Custom Pages & Revisions
+    match /pages/{pageId} {
+      allow get: if isValidId(pageId) && (
+        existing().status == 'published'
+        || (isVerifiedUser() && (existing().authorId == request.auth.uid || isEditorialStaff()))
+      );
+      allow list: if resource.data.status == 'published'
+        || (isVerifiedUser() && resource.data.authorId == request.auth.uid)
+        || isBootstrappedSuperAdmin();
+      allow create: if isVerifiedUser()
+        && isValidId(pageId)
+        && isEditorOrChief()
+        && isValidCmsPage(incoming(), pageId)
+        && incoming().authorId == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(pageId)
+        && isEditorOrChief()
+        && isValidCmsPage(incoming(), pageId)
+        && incoming().id == existing().id
+        && incoming().authorId == existing().authorId
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'slug', 'title', 'description', 'status', 'showInHeader', 'showInFooter',
+          'blocks', 'seoTitle', 'seoDescription', 'scheduledAt', 'publishedAt', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(pageId);
+
+      match /revisions/{revisionId} {
+        allow get: if isValidId(pageId) && isValidId(revisionId) && isEditorOrChief() && exists(/databases/$(database)/documents/pages/$(pageId));
+        allow list: if isValidId(pageId) && (isBootstrappedSuperAdmin() || (isVerifiedUser() && resource.data.editorId == request.auth.uid));
+        allow create: if isVerifiedUser()
+          && isValidId(pageId)
+          && isValidId(revisionId)
+          && isEditorOrChief()
+          && isValidPageRevision(incoming(), pageId, revisionId)
+          && exists(/databases/$(database)/documents/pages/$(pageId));
+        allow update, delete: if false;
+      }
+    }
+
+    // Reorderable Homepage Sections
+    match /homepage_sections/{sectionId} {
+      allow get: if isValidId(sectionId);
+      allow list: if resource.data.orderIndex >= 0;
+      allow create, update: if isVerifiedUser()
+        && isValidId(sectionId)
+        && isEditorOrChief()
+        && isValidHomepageSection(incoming(), sectionId);
+      allow delete: if isEditorOrChief() && isValidId(sectionId);
+    }
+
+    // Editable Header & Footer Menus
+    match /navigation_items/{itemId} {
+      allow get: if isValidId(itemId);
+      allow list: if resource.data.orderIndex >= 0;
+      allow create, update: if isVerifiedUser()
+        && isValidId(itemId)
+        && isEditorOrChief()
+        && isValidNavigationItem(incoming(), itemId);
+      allow delete: if isEditorOrChief() && isValidId(itemId);
+    }
+
+    // Granular Editable Role Permissions Matrix
+    match /role_permissions/{roleId} {
+      allow get: if isValidId(roleId);
+      allow list: if resource.data.roleName is string;
+      allow create, update: if isVerifiedUser()
+        && isValidId(roleId)
+        && isAdmin()
+        && isValidRolePermissionConfig(incoming(), roleId);
+      allow delete: if false;
+    }
+
+    // Newsletter Subscribers (PII protected)
+    match /subscribers/{subscriberId} {
+      allow get: if isValidId(subscriberId) && isAdmin();
+      allow list: if isBootstrappedSuperAdmin();
+      allow create: if isValidId(subscriberId) && isValidSubscriber(incoming(), subscriberId);
+      allow update: if false;
+      allow delete: if isValidId(subscriberId) && isAdmin();
+    }
+
+    // Media Assets
+    match /media_assets/{assetId} {
+      allow get: if isValidId(assetId);
+      allow list: if resource.data.aspectRatio in ['16:9', '4:3', '1:1', '3:4'];
+      allow create: if isVerifiedUser()
+        && isValidId(assetId)
+        && isMediaStaff()
+        && isValidMediaAsset(incoming(), assetId)
+        && incoming().uploadedBy == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(assetId)
+        && isMediaStaff()
+        && isValidMediaAsset(incoming(), assetId)
+        && incoming().id == existing().id
+        && incoming().uploadedBy == existing().uploadedBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'altText', 'mediaType', 'updatedAt']);
+      allow delete: if isValidId(assetId) && isMediaStaff();
+    }
+
+    // Advertising Campaigns
+    match /campaigns/{campaignId} {
+      allow get: if isValidId(campaignId) && (existing().status == 'active' || isAdStaff());
+      allow list: if resource.data.status == 'active' || isBootstrappedSuperAdmin();
+      allow create: if isVerifiedUser()
+        && isValidId(campaignId)
+        && isAdStaff()
+        && isValidCampaign(incoming(), campaignId)
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(campaignId)
+        && isValidCampaign(incoming(), campaignId)
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && (
+          (isAdStaff() && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'sponsor', 'placement', 'targetUrl', 'imageUrl', 'buttonText', 'status', 'impressions', 'clicks', 'updatedAt']))
+          || (existing().status == 'active' && incoming().diff(existing()).affectedKeys().hasOnly(['impressions', 'clicks', 'updatedAt']))
+        );
+      allow delete: if isValidId(campaignId) && isAdStaff();
+    }
+
+    // Audit Logs (Append-Only)
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && isAdmin();
+      allow list: if isBootstrappedSuperAdmin();
+      allow create: if isVerifiedUser()
+        && isValidId(logId)
+        && isEditorialStaff()
+        && isValidAuditLog(incoming(), logId);
+      allow update, delete: if false;
+    }
+
+    // Site Settings
+    match /settings/{settingId} {
+      allow get: if isValidId(settingId);
+      allow list: if resource.data.defaultLanguage in ['en', 'es', 'fr', 'de', 'ja'];
+      allow create, update: if isVerifiedUser()
+        && isValidId(settingId)
+        && isAdmin()
+        && isValidSettings(incoming());
+      allow delete: if false;
+    }
+  }
+}
